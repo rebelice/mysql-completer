@@ -17,6 +17,9 @@ func TestCompleter(t *testing.T) {
 		{
 			input: "SELECT * FROM |",
 		},
+		{
+			input: "SELECT | FROM t",
+		},
 	}
 
 	for _, test := range tests {
@@ -32,6 +35,8 @@ func TestCompleter(t *testing.T) {
 		scanner.Push()
 		context := AutoCompletionContext{}
 		context.CollectCandidates(parser, scanner, caretOffset, 1)
+		fmt.Printf("CANDIDATES FOR: %s\n", test.input)
+		fmt.Println("TOKENS -----------------")
 		for k, candidate := range context.Candidates.Tokens {
 			fmt.Printf("%s: ", lexer.SymbolicNames[k])
 			for _, token := range candidate {
@@ -39,6 +44,7 @@ func TestCompleter(t *testing.T) {
 			}
 			fmt.Println("")
 		}
+		fmt.Println("RULES -----------------")
 		for k, candidate := range context.Candidates.Rules {
 			fmt.Printf("%s: ", parser.RuleNames[k])
 			for _, r := range candidate {
