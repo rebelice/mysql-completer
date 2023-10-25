@@ -53,7 +53,7 @@ func NewCodeCompletionCore(parser antlr.Parser) *CodeCompletionCore {
 	}
 }
 
-func (c *CodeCompletionCore) CollectCandidates(caretTokenIndex int, context antlr.ParserRuleContext) {
+func (c *CodeCompletionCore) CollectCandidates(caretTokenIndex int, context antlr.ParserRuleContext) *CandidatesCollection {
 	// init
 	c.candidates = &CandidatesCollection{
 		Tokens: make(map[int][]int),
@@ -94,6 +94,7 @@ func (c *CodeCompletionCore) CollectCandidates(caretTokenIndex int, context antl
 		startRule = context.GetRuleIndex()
 	}
 	c.ProcessRule(c.atn.GetRuleToStartState(startRule), 0, callStack, "")
+	return c.candidates
 }
 
 func (c *CodeCompletionCore) DetermineFollowSets(start, stop antlr.ATNState) FollowSetsList {
@@ -229,7 +230,10 @@ func (c *CodeCompletionCore) ProcessRule(startState antlr.ATNState, tokenIndex i
 	// 3. We get this lookup for free with any 2nd or further visit of the same rule, which often happens
 	//    in non trivial grammars, especially with (recursive) expressions and of course when invoking code completion
 	//    multiple times.
-	if c.setsPerState != nil && (len(c.setsPerState[startState.GetStateNumber()].sets) == 0) {
+	if c.setsPerState == nil {
+		c.setsPerState = make(FollowSetsPerState)
+	}
+	if _, exists := c.setsPerState[startState.GetStateNumber()]; !exists {
 		stop := c.atn.GetRuleToStopState(startState.GetRuleIndex())
 		followSets := c.DetermineFollowSets(startState, stop)
 		sets, exists := c.setsPerState[startState.GetStateNumber()]
