@@ -1,6 +1,11 @@
 package completion
 
 import (
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+
 	"github.com/antlr4-go/antlr/v4"
 	mysql "github.com/bytebase/mysql-parser"
 )
@@ -394,13 +399,495 @@ func unquote(s string) string {
 	return s
 }
 
-func GetCodeCompletionList(caretLine int, caretOffset int, defaultSchema string, uppercaseKeywords bool, parser *mysql.MySQLParser) {
+type AutoCompletionImageType int
+
+const (
+	AutoCompletionImageTypeNone AutoCompletionImageType = iota
+	AutoCompletionImageTypeKeyword
+	AutoCompletionImageTypeSchema
+	AutoCompletionImageTypeTable
+	AutoCompletionImageTypeRoutine
+	AutoCompletionImageTypeFunction
+	AutoCompletionImageTypeView
+	AutoCompletionImageTypeColumn
+	AutoCompletionImageTypeOperator
+	AutoCompletionImageTypeEngine
+	AutoCompletionImageTypeTrigger
+	AutoCompletionImageTypeLogFileGroup
+	AutoCompletionImageTypeUserVar
+	AutoCompletionImageTypeSystemVar
+	AutoCompletionImageTypeTableSpace
+	AutoCompletionImageTypeEvent
+	AutoCompletionImageTypeIndex
+	AutoCompletionImageTypeUser
+	AutoCompletionImageTypeCharset
+	AutoCompletionImageTypeCollation
+)
+
+type AutoCompletionEntry struct {
+	ImageType AutoCompletionImageType
+	Text      string
+}
+
+func (e *AutoCompletionEntry) String() string {
+	return fmt.Sprintf("%d(%s)", e.ImageType, e.Text)
+}
+
+type CompletionMap map[string]bool
+
+func (m CompletionMap) toSLice() []string {
+	var result []string
+	for key := range m {
+		result = append(result, key)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func (m CompletionMap) Insert(entry AutoCompletionEntry) {
+	m[entry.String()] = true
+}
+
+func (m CompletionMap) insertSchemas() {
+	// TODO: load schemas
+	m.Insert(AutoCompletionEntry{
+		ImageType: AutoCompletionImageTypeSchema,
+		Text:      "db",
+	})
+}
+
+func (m CompletionMap) insertTables() {
+	// TODO: load tables
+	for i := 0; i < 5; i++ {
+		m.Insert(AutoCompletionEntry{
+			ImageType: AutoCompletionImageTypeTable,
+			Text:      fmt.Sprintf("table%d", i),
+		})
+	}
+}
+
+func (m CompletionMap) insertViews() {
+	// TODO: load views
+	for i := 0; i < 5; i++ {
+		m.Insert(AutoCompletionEntry{
+			ImageType: AutoCompletionImageTypeView,
+			Text:      fmt.Sprintf("view%d", i),
+		})
+	}
+}
+
+func (m CompletionMap) insertColumns(tables map[string]bool) {
+	// TODO: load columns
+	for table := range tables {
+		id, err := strconv.Atoi(table[len(table)-1:])
+		if err != nil {
+			panic(err)
+		}
+		for i := 0; i < id; i++ {
+			m.Insert(AutoCompletionEntry{
+				ImageType: AutoCompletionImageTypeColumn,
+				Text:      fmt.Sprintf("c%d", i),
+			})
+		}
+	}
+}
+
+func GetCodeCompletionList(caretLine int, caretOffset int, defaultSchema string, uppercaseKeywords bool, parser *mysql.MySQLParser) []string {
+	context := AutoCompletionContext{}
+
+	// A set for each object type. This will sort the groups alphabetically and avoids duplicates,
+	// but allows to add them as groups to the final list.
+	schemaEntries := make(CompletionMap)
+	tableEntries := make(CompletionMap)
+	columnEntries := make(CompletionMap)
+	viewEntries := make(CompletionMap)
+	functionEntries := make(CompletionMap)
+	// udfEntries := make(CompletionMap)
+	runtimeFunctionEntries := make(CompletionMap)
+	procedureEntries := make(CompletionMap)
+	triggerEntries := make(CompletionMap)
+	engineEntries := make(CompletionMap)
+	logFileGroupEntries := make(CompletionMap)
+	tableSpaceEntries := make(CompletionMap)
+	systemVarEntries := make(CompletionMap)
+	keywordEntries := make(CompletionMap)
+	collationEntries := make(CompletionMap)
+	charsetEntries := make(CompletionMap)
+	eventEntries := make(CompletionMap)
+
+	// Handled but needs meat yet.
+	// userVarEntries := make(CompletionMap)
+
+	// To be done yet.
+	userEntries := make(CompletionMap)
+	indexEntries := make(CompletionMap)
+	pluginEntries := make(CompletionMap)
+	// fkEntries := make(CompletionMap)
+	labelEntries := make(CompletionMap)
+
+	synonyms := map[int][]string{
+		mysql.MySQLLexerCHAR_SYMBOL:         {"CHARACTER"},
+		mysql.MySQLLexerNOW_SYMBOL:          {"CURRENT_TIMESTAMP", "LOCALTIME", "LOCALTIMESTAMP"},
+		mysql.MySQLLexerDAY_SYMBOL:          {"DAYOFMONTH", "SQL_TSI_DAY"},
+		mysql.MySQLLexerDECIMAL_SYMBOL:      {"DEC"},
+		mysql.MySQLLexerDISTINCT_SYMBOL:     {"DISTINCTROW"},
+		mysql.MySQLLexerCOLUMNS_SYMBOL:      {"FIELDS"},
+		mysql.MySQLLexerFLOAT_SYMBOL:        {"FLOAT4"},
+		mysql.MySQLLexerDOUBLE_SYMBOL:       {"FLOAT8"},
+		mysql.MySQLLexerINT_SYMBOL:          {"INTEGER", "INT4"},
+		mysql.MySQLLexerRELAY_THREAD_SYMBOL: {"IO_THREAD"},
+		mysql.MySQLLexerSUBSTRING_SYMBOL:    {"MID", "SUBSTR"},
+		mysql.MySQLLexerMID_SYMBOL:          {"MEDIUMINT"},
+		mysql.MySQLLexerMEDIUMINT_SYMBOL:    {"MIDDLEINT", "INT3"},
+		mysql.MySQLLexerNDBCLUSTER_SYMBOL:   {"NDB"},
+		mysql.MySQLLexerREGEXP_SYMBOL:       {"RLIKE"},
+		mysql.MySQLLexerDATABASE_SYMBOL:     {"SCHEMA"},
+		mysql.MySQLLexerDATABASES_SYMBOL:    {"SCHEMAS"},
+		mysql.MySQLLexerUSER_SYMBOL:         {"SESSION_USER"},
+		mysql.MySQLLexerSTD_SYMBOL:          {"STDDEV", "STDDEV"},
+		mysql.MySQLLexerVARCHAR_SYMBOL:      {"VARCHARACTER"},
+		mysql.MySQLLexerVARIANCE_SYMBOL:     {"VAR_POP"},
+		mysql.MySQLLexerTINYINT_SYMBOL:      {"INT1"},
+		mysql.MySQLLexerSMALLINT_SYMBOL:     {"INT2"},
+		mysql.MySQLLexerBIGINT_SYMBOL:       {"INT8"},
+		mysql.MySQLLexerSECOND_SYMBOL:       {"SQL_TSI_SECOND"},
+		mysql.MySQLLexerMINUTE_SYMBOL:       {"SQL_TSI_MINUTE"},
+		mysql.MySQLLexerHOUR_SYMBOL:         {"SQL_TSI_HOUR"},
+		mysql.MySQLLexerWEEK_SYMBOL:         {"SQL_TSI_WEEK"},
+		mysql.MySQLLexerMONTH_SYMBOL:        {"SQL_TSI_MONTH"},
+		mysql.MySQLLexerQUARTER_SYMBOL:      {"SQL_TSI_QUARTER"},
+		mysql.MySQLLexerYEAR_SYMBOL:         {"SQL_TSI_YEAR"},
+	}
+
 	scanner := NewScanner(parser.GetTokenStream().(*antlr.CommonTokenStream))
+	lexer := parser.GetTokenStream().GetTokenSource().(*mysql.MySQLLexer)
 
 	// Move to caret position and store that on the scanner stack.
 	scanner.AdvanceToPosition(caretLine, caretOffset)
 	scanner.Push()
 
-	context := AutoCompletionContext{}
 	context.CollectCandidates(parser, scanner, caretOffset, caretLine)
+
+	for token, value := range context.Candidates.Tokens {
+		entry := parser.SymbolicNames[token]
+		if strings.HasSuffix(entry, "_SYMBOL") {
+			entry = entry[:len(entry)-7]
+		} else {
+			entry = unquote(entry)
+		}
+
+		list := 0
+		if len(value) > 0 {
+			// A function call?
+			if value[0] == mysql.MySQLLexerOPEN_PAR_SYMBOL {
+				list = 1
+			} else {
+				for _, item := range value {
+					subEntry := parser.SymbolicNames[item]
+					if strings.HasSuffix(subEntry, "_SYMBOL") {
+						subEntry = subEntry[:len(subEntry)-7]
+					} else {
+						subEntry = unquote(subEntry)
+					}
+					entry += " " + subEntry
+				}
+			}
+		}
+
+		switch list {
+		case 1:
+			runtimeFunctionEntries.Insert(AutoCompletionEntry{
+				ImageType: AutoCompletionImageTypeFunction,
+				Text:      strings.ToLower(entry) + "()",
+			})
+		default:
+			if !uppercaseKeywords {
+				entry = strings.ToLower(entry)
+			}
+
+			keywordEntries.Insert(AutoCompletionEntry{
+				ImageType: AutoCompletionImageTypeKeyword,
+				Text:      entry,
+			})
+
+			// Add also synonyms, if there are any.
+			if synonyms[token] != nil {
+				for _, synonym := range synonyms[token] {
+					if !uppercaseKeywords {
+						synonym = strings.ToLower(synonym)
+					}
+
+					keywordEntries.Insert(AutoCompletionEntry{
+						ImageType: AutoCompletionImageTypeKeyword,
+						Text:      synonym,
+					})
+				}
+			}
+		}
+	}
+
+	for candidate := range context.Candidates.Rules {
+		// Restore the scanner position to the caret position and store that value again for the next round.
+		scanner.Pop()
+		scanner.Push()
+
+		switch candidate {
+		case mysql.MySQLParserRULE_runtimeFunctionCall:
+			// TODO: load runtime functions
+			runtimeFunctionEntries.Insert(AutoCompletionEntry{
+				ImageType: AutoCompletionImageTypeFunction,
+				Text:      "runtimeFunction()",
+			})
+		case mysql.MySQLParserRULE_schemaRef:
+			schemaEntries.insertSchemas()
+		case mysql.MySQLParserRULE_tableRefWithWildcard:
+			// A special form of table references (id.id.*) used only in multi-table delete.
+			// Handling is similar as for column references (just that we have table/view objects instead of column refs).
+			schema, _, flags := determineSchemaTableQualifier(scanner, lexer)
+			if flags&ObjectFlagsShowSchemas != 0 {
+				schemaEntries.insertSchemas()
+			}
+
+			schemas := make(map[string]bool)
+			if len(schema) == 0 {
+				schemas[defaultSchema] = true
+			} else {
+				schemas[schema] = true
+			}
+			if flags&ObjectFlagsShowTables != 0 {
+				tableEntries.insertTables()
+				viewEntries.insertViews()
+			}
+		case mysql.MySQLParserRULE_tableRef, mysql.MySQLParserRULE_filterTableRef:
+			qualifier, flags := determineQualifier(scanner, lexer, caretOffset)
+
+			if flags&ObjectFlagsShowFirst != 0 {
+				schemaEntries.insertSchemas()
+			}
+
+			if flags&ObjectFlagsShowSecond != 0 {
+				schemas := make(map[string]bool)
+				if len(qualifier) == 0 {
+					schemas[defaultSchema] = true
+				} else {
+					schemas[qualifier] = true
+				}
+
+				tableEntries.insertTables()
+				viewEntries.insertViews()
+			}
+		case mysql.MySQLParserRULE_tableWild, mysql.MySQLParserRULE_columnRef:
+			schema, table, flags := determineSchemaTableQualifier(scanner, lexer)
+			if flags&ObjectFlagsShowSchemas != 0 {
+				schemaEntries.insertSchemas()
+			}
+
+			schemas := make(map[string]bool)
+			if len(schema) != 0 {
+				schemas[schema] = true
+			} else if len(context.References) > 0 {
+				for _, reference := range context.References {
+					if len(reference.Schema) != 0 {
+						schemas[reference.Schema] = true
+					}
+				}
+			}
+
+			if len(schemas) == 0 {
+				schemas[defaultSchema] = true
+			}
+
+			if flags&ObjectFlagsShowTables != 0 {
+				tableEntries.insertTables()
+				if candidate == mysql.MySQLParserRULE_columnRef {
+					viewEntries.insertViews()
+
+					for _, reference := range context.References {
+						if (len(schema) == 0 && len(reference.Schema) == 0) || schemas[reference.Schema] {
+							if len(reference.Alias) == 0 {
+								tableEntries.Insert(AutoCompletionEntry{
+									ImageType: AutoCompletionImageTypeTable,
+									Text:      reference.Table,
+								})
+							} else {
+								tableEntries.Insert(AutoCompletionEntry{
+									ImageType: AutoCompletionImageTypeTable,
+									Text:      reference.Alias,
+								})
+							}
+						}
+					}
+				}
+			}
+
+			if flags&ObjectFlagsShowColumns != 0 {
+				if schema == table { // Schema and table are equal if it's not clear if we see a schema or table qualifier.
+					schemas[defaultSchema] = true
+				}
+
+				tables := make(map[string]bool)
+				if len(table) != 0 {
+					tables[table] = true
+
+					// Could be an alias
+					for _, reference := range context.References {
+						if strings.EqualFold(reference.Alias, table) {
+							tables[reference.Table] = true
+							schemas[reference.Schema] = true
+						}
+					}
+				} else if len(context.References) > 0 && candidate == mysql.MySQLParserRULE_columnRef {
+					for _, reference := range context.References {
+						tables[reference.Table] = true
+					}
+				}
+
+				if len(tables) > 0 {
+					columnEntries.insertColumns(tables)
+				}
+			}
+
+			// TODO: special handling for triggers.
+		}
+	}
+
+	scanner.Pop() // Clear the scanner stack.
+	var result []string
+	result = append(result, keywordEntries.toSLice()...)
+	result = append(result, columnEntries.toSLice()...)
+	result = append(result, userEntries.toSLice()...)
+	result = append(result, labelEntries.toSLice()...)
+	result = append(result, tableEntries.toSLice()...)
+	result = append(result, viewEntries.toSLice()...)
+	result = append(result, schemaEntries.toSLice()...)
+	result = append(result, functionEntries.toSLice()...)
+	result = append(result, procedureEntries.toSLice()...)
+	result = append(result, triggerEntries.toSLice()...)
+	result = append(result, indexEntries.toSLice()...)
+	result = append(result, eventEntries.toSLice()...)
+	result = append(result, userEntries.toSLice()...)
+	result = append(result, engineEntries.toSLice()...)
+	result = append(result, pluginEntries.toSLice()...)
+	result = append(result, logFileGroupEntries.toSLice()...)
+	result = append(result, tableSpaceEntries.toSLice()...)
+	result = append(result, charsetEntries.toSLice()...)
+	result = append(result, collationEntries.toSLice()...)
+	result = append(result, runtimeFunctionEntries.toSLice()...)
+	result = append(result, systemVarEntries.toSLice()...)
+
+	return result
+}
+
+type ObjectFlags int
+
+const (
+	ObjectFlagsShowSchemas ObjectFlags = 1 << iota
+	ObjectFlagsShowTables
+	ObjectFlagsShowColumns
+	ObjectFlagsShowFirst
+	ObjectFlagsShowSecond
+)
+
+func determineSchemaTableQualifier(scanner *Scanner, lexer *mysql.MySQLLexer) (schema, table string, flags ObjectFlags) {
+	position := scanner.TokenIndex()
+	if scanner.TokenChannel() != 0 {
+		scanner.Next(true /* skipHidden */) // First skip to the next non-hidden token.
+	}
+
+	tokenType := scanner.TokenType()
+	if tokenType != mysql.MySQLLexerDOT_SYMBOL && !lexer.IsIdentifier(scanner.TokenType()) {
+		// We are at the end of an incomplete identifier spec. Jump back, so that the other tests succeed.
+		scanner.Previous(true /* skipHidden */)
+	}
+
+	if position > 0 {
+		if lexer.IsIdentifier(scanner.TokenType()) && scanner.LookBack(false /* skipHidden */) == mysql.MySQLLexerDOT_SYMBOL {
+			scanner.Previous(true /* skipHidden */)
+		}
+		if scanner.Is(mysql.MySQLLexerDOT_SYMBOL) && lexer.IsIdentifier(scanner.LookBack(false /* skipHidden */)) {
+			scanner.Previous(true /* skipHidden */)
+
+			if scanner.LookBack(false /* skipHidden */) == mysql.MySQLLexerDOT_SYMBOL {
+				scanner.Previous(true /* skipHidden */)
+				if lexer.IsIdentifier(scanner.LookBack(false /* skipHidden */)) {
+					scanner.Previous(true /* skipHidden */)
+				}
+			}
+		}
+	}
+
+	schema = ""
+	table = ""
+	temp := ""
+	if lexer.IsIdentifier(scanner.TokenType()) {
+		temp = unquote(scanner.TokenText())
+		scanner.Next(true /* skipHidden */)
+	}
+
+	if !scanner.Is(mysql.MySQLLexerDOT_SYMBOL) || position <= scanner.TokenIndex() {
+		return schema, table, ObjectFlagsShowSchemas | ObjectFlagsShowTables | ObjectFlagsShowColumns
+	}
+
+	scanner.Next(true /* skipHidden */) // skip dot
+	table = temp
+	schema = temp
+	if lexer.IsIdentifier(scanner.TokenType()) {
+		temp = unquote(scanner.TokenText())
+		scanner.Next(true /* skipHidden */)
+
+		if !scanner.Is(mysql.MySQLLexerDOT_SYMBOL) || position <= scanner.TokenIndex() {
+			return schema, table, ObjectFlagsShowTables | ObjectFlagsShowColumns
+		}
+
+		table = temp
+		return schema, table, ObjectFlagsShowColumns
+	}
+
+	return schema, table, ObjectFlagsShowTables | ObjectFlagsShowColumns
+}
+
+func determineQualifier(scanner *Scanner, lexer *mysql.MySQLLexer, offsetInLine int) (string, ObjectFlags) {
+	// Five possible positions here:
+	//   - In the first id (including the position directly after the last char).
+	//   - In the space between first id and a dot.
+	//   - On a dot (visually directly before the dot).
+	//   - In space after the dot, that includes the position directly after the dot.
+	//   - In the second id.
+	// All parts are optional (though not at the same time). The on-dot position is considered the same
+	// as in first id as it visually belongs to the first id
+
+	position := scanner.TokenIndex()
+	if scanner.TokenChannel() != 0 {
+		scanner.Next(true /* skipHidden */) // First skip to the next non-hidden token.
+	}
+
+	if !scanner.Is(mysql.MySQLLexerDOT_SYMBOL) && !lexer.IsIdentifier(scanner.TokenType()) {
+		// We are at the end of an incomplete identifier spec. Jump back, so that the other tests succeed.
+		scanner.Previous(true /* skipHidden */)
+	}
+
+	// Go left until we find something not related to an id or find at most 1 dot.
+	if position > 0 {
+		if lexer.IsIdentifier(scanner.TokenType()) && scanner.LookBack(false /* skipHidden */) == mysql.MySQLLexerDOT_SYMBOL {
+			scanner.Previous(true /* skipHidden */)
+		}
+		if scanner.Is(mysql.MySQLLexerDOT_SYMBOL) && lexer.IsIdentifier(scanner.LookBack(false /* skipHidden */)) {
+			scanner.Previous(true /* skipHidden */)
+		}
+	}
+
+	// The scanner is now on the leading identifier or dot (if there's no leading id).
+	qualifier := ""
+	temp := ""
+	if lexer.IsIdentifier(scanner.TokenType()) {
+		temp = unquote(scanner.TokenText())
+		scanner.Next(true /* skipHidden */)
+	}
+
+	if !scanner.Is(mysql.MySQLLexerDOT_SYMBOL) || position <= scanner.TokenIndex() {
+		return qualifier, ObjectFlagsShowFirst | ObjectFlagsShowSecond
+	}
+
+	qualifier = temp
+	return qualifier, ObjectFlagsShowSecond
 }

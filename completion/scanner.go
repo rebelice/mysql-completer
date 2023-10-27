@@ -22,6 +22,10 @@ func (s *Scanner) TokenIndex() int {
 	return s.index
 }
 
+func (s *Scanner) TokenChannel() int {
+	return s.tokens[s.index].GetChannel()
+}
+
 func (s *Scanner) LookBack(skipHidden bool) int {
 	index := s.index
 	for index > 0 {
